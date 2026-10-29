@@ -1,0 +1,11 @@
+{
+  "name": "skill-router",
+  "owner": { "name": "Ilke" },
+  "plugins": [
+    {
+      "name": "skill-router",
+      "source": "./",
+      "description": "Routes each task to the installed skills it needs, using a cheap Haiku pass."
+    }
+  ]
+}
