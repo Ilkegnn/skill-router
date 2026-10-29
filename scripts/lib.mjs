@@ -11,7 +11,7 @@ export const PROFILE = path.join(DATA_DIR, 'profile.json');
 
 function parseFrontmatter(file) {
   let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  try { text = fs.readFileSync(file, 'utf8').replace(/^﻿/, ''); } catch { return null; }
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return null;
   const lines = m[1].split(/\r?\n/);
@@ -39,7 +39,8 @@ function scan(dir, prefix, source, out) {
     if (!e.isDirectory()) continue;
     const fm = parseFrontmatter(path.join(dir, e.name, 'SKILL.md'));
     if (!fm || fm['disable-model-invocation'] === 'true') continue;
-    const name = prefix + (fm.name || e.name);
+    // Claude Code invokes by slug; a display-style `name:` ("Agent Cost Report") falls back to the folder name.
+    const name = prefix + (/^[a-z0-9][a-z0-9-]*$/.test(fm.name || '') ? fm.name : e.name);
     out.set(name, { name, source, dir: path.join(dir, e.name), description: (fm.description || '').slice(0, 320), excerpt: fm.excerpt });
   }
 }
@@ -65,7 +66,10 @@ export function buildCatalog(cwd) {
   } catch {}
 
   if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out);
-  return [...out.values()];
+
+  // A local copy of a plugin skill (same name, e.g. `systematic-debugging` next to `superpowers:systematic-debugging`)
+  // would be offered twice; keep the one the user installed directly.
+  return [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
 }
 
 export function catalogSignature(catalog) {

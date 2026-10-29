@@ -11,7 +11,7 @@ import {
 } from './lib.mjs';
 
 // Bump when the setup prompt or profile format changes, so existing installs re-tune once.
-const SETUP_VERSION = 2;
+const SETUP_VERSION = 3;
 const LOCK = path.join(DATA_DIR, 'setup.lock');
 const LOCK_TTL_MS = 10 * 60 * 1000;
 
@@ -25,7 +25,7 @@ Return one JSON object, nothing else:
 }
 Rules:
 - Use only exact skill names from the list.
-- hints: group the skills into task domains. Within a domain, list the most generally useful skill first. Every skill that a model should ever pick on its own belongs to some domain.
+- hints: group the skills into focused task domains of at most 8 skills; split a broad area (e.g. UI) into narrower ones (visual polish, stress-testing, component sourcing) instead of one long list. Within a domain, list the most generally useful skill first. Every skill in the list belongs to some domain, including security, review and tooling skills.
 - fileRules: for each file kind, the one or two skills that should be loaded before editing that kind of file. Leave a kind out if no skill fits well.
 - cleanup: only skills that duplicate another installed skill (same purpose; keep the maintained or more complete one) or that describe themselves as deprecated. Being niche is NOT a reason. When unsure, leave it out.`;
 
@@ -108,6 +108,9 @@ function run() {
       .map(c => ({ ...c, source: catalog.find(s => s.name === c.skill).source, dir: catalog.find(s => s.name === c.skill).dir })),
     cleanupNoticeShown: false,
   };
+  const grouped = new Set(profile.hints.flatMap(h => h.skills));
+  const ungrouped = catalog.map(s => s.name).filter(n => !grouped.has(n));
+  if (ungrouped.length) profile.hints.push({ domain: 'Other', skills: ungrouped });
   writeJson(PROFILE, profile);
   fs.rmSync(LOCK, { force: true });
   log(`setup ok ms=${Date.now() - started} skills=${catalog.length} domains=${profile.hints.length} fileRules=${Object.keys(profile.fileRules).length} cleanup=${profile.cleanup.length}`);
