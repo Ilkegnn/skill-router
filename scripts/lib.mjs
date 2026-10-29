@@ -27,6 +27,8 @@ function parseFrontmatter(file) {
     }
     fm[kv[1]] = value.replace(/^["']|["']$/g, '');
   }
+  // Opening of the body, where skills usually say what they cover and what they don't. Only setup reads it.
+  fm.excerpt = text.slice(m[0].length).replace(/\s+/g, ' ').trim().slice(0, 600);
   return fm;
 }
 
@@ -38,7 +40,7 @@ function scan(dir, prefix, source, out) {
     const fm = parseFrontmatter(path.join(dir, e.name, 'SKILL.md'));
     if (!fm || fm['disable-model-invocation'] === 'true') continue;
     const name = prefix + (fm.name || e.name);
-    out.set(name, { name, source, dir: path.join(dir, e.name), description: (fm.description || '').slice(0, 320) });
+    out.set(name, { name, source, dir: path.join(dir, e.name), description: (fm.description || '').slice(0, 320), excerpt: fm.excerpt });
   }
 }
 
@@ -80,6 +82,13 @@ export function writeJson(file, value) {
 }
 
 export const loadProfile = () => readJson(PROFILE, null);
+
+// Optional, user-written; absent by default. { "protect": [...], "ignore": [...], "fileRules": { kind: [...] } }
+// protect: never offered for cleanup. ignore: never routed or reminded. fileRules: replaces setup's choice for a kind.
+export function loadOverrides() {
+  const o = readJson(path.join(DATA_DIR, 'overrides.json'), {});
+  return { protect: o.protect || [], ignore: o.ignore || [], fileRules: o.fileRules || {} };
+}
 
 const stateFile = (sid) => path.join(DATA_DIR, 'state', `${String(sid).replace(/[^\w-]/g, '')}.json`);
 export const loadState = (sid) => readJson(stateFile(sid), { routed: [], invoked: [], reminded: [] });

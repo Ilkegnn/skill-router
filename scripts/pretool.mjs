@@ -1,7 +1,7 @@
 // PreToolUse hook: records Skill calls and, mid-task, reminds the model once per session about the
 // skills setup mapped to the kind of file it is about to edit. Local only — no model call.
 import path from 'node:path';
-import { FILE_KINDS, buildCatalog, loadProfile, loadState, saveState, log, readStdin } from './lib.mjs';
+import { FILE_KINDS, buildCatalog, loadProfile, loadOverrides, loadState, saveState, log, readStdin } from './lib.mjs';
 
 async function main() {
   if (process.env.SKILL_ROUTER_CHILD) return;
@@ -18,15 +18,17 @@ async function main() {
     return;
   }
 
-  const rules = loadProfile()?.fileRules;
+  const profile = loadProfile();
   const file = args.file_path || args.notebook_path || '';
-  if (!rules || !file) return;
+  if (!profile || !file) return;
+  const overrides = loadOverrides();
+  const rules = { ...profile.fileRules, ...overrides.fileRules };
   const content = [args.content, args.new_string, ...(args.edits || []).map(e => e.new_string)].filter(Boolean).join('\n');
 
   const matched = Object.entries(rules).filter(([kind]) => FILE_KINDS[kind]?.test(file, content)).flatMap(([, skills]) => skills);
   if (!matched.length) return;
   const known = new Set(buildCatalog(input.cwd).map(s => s.name));
-  const due = [...new Set(matched)].filter(s => known.has(s) && !state.invoked.includes(s) && !state.reminded.includes(s));
+  const due = [...new Set(matched)].filter(s => known.has(s) && !overrides.ignore.includes(s) && !state.invoked.includes(s) && !state.reminded.includes(s));
   if (!due.length) return;
 
   state.reminded.push(...due);

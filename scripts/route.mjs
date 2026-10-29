@@ -1,5 +1,5 @@
 // UserPromptSubmit hook: asks Haiku which skills fit the request and hands the list to the main model.
-import { buildCatalog, loadProfile, loadState, saveState, askClaude, extractJson, log, readStdin } from './lib.mjs';
+import { buildCatalog, loadProfile, loadOverrides, loadState, saveState, askClaude, extractJson, log, readStdin } from './lib.mjs';
 
 const MIN_PROMPT_CHARS = 200;
 const MAX_PROMPT_CHARS = 16000;
@@ -19,7 +19,8 @@ async function main() {
   const prompt = (input.prompt || '').trim();
   if (prompt.length < MIN_PROMPT_CHARS || prompt.startsWith('/')) return;
 
-  const catalog = buildCatalog(input.cwd);
+  const { ignore } = loadOverrides();
+  const catalog = buildCatalog(input.cwd).filter(s => !ignore.includes(s.name));
   const names = new Set(catalog.map(s => s.name));
   const hints = (loadProfile()?.hints || []).map(h => `${h.domain}: ${h.skills.join(', ')}`).join('\n');
 

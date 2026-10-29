@@ -6,14 +6,17 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, writeJson,
+  DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, loadOverrides, writeJson,
   askClaude, extractJson, log, readStdin,
 } from './lib.mjs';
 
+// Bump when the setup prompt or profile format changes, so existing installs re-tune once.
+const SETUP_VERSION = 2;
 const LOCK = path.join(DATA_DIR, 'setup.lock');
 const LOCK_TTL_MS = 10 * 60 * 1000;
 
-const SYSTEM = `You configure a skill router for a coding agent. You get the user's installed skills (name: description) and a list of file kinds.
+const SYSTEM = `You configure a skill router for a coding agent. You get the user's installed skills (name, description, and the opening of each skill's body) and a list of file kinds.
+Judge each skill by what its body says it covers, not by its name or a broad description: a skill written for marketing sites is not a general UI skill, a mobile-web skill is not a React Native skill, a terse-chat mode is not a writing skill.
 Return one JSON object, nothing else:
 {
   "hints": [{"domain": "<kind of task, e.g. 'UI layout and visual polish'>", "skills": ["<skill>", ...]}],
@@ -48,7 +51,7 @@ async function hook() {
   const catalog = buildCatalog();
   const profile = loadProfile();
 
-  if (!profile || profile.signature !== catalogSignature(catalog)) {
+  if (!profile || profile.signature !== catalogSignature(catalog) || profile.setupVersion !== SETUP_VERSION) {
     launchBackground();
     if (!profile) {
       process.stdout.write(JSON.stringify({
@@ -58,11 +61,13 @@ async function hook() {
     return;
   }
 
-  if (profile.cleanup?.length && !profile.cleanupNoticeShown) {
+  const { protect } = loadOverrides();
+  const flagged = (profile.cleanup || []).filter(c => !protect.includes(c.skill)).length;
+  if (flagged && !profile.cleanupNoticeShown) {
     profile.cleanupNoticeShown = true;
     writeJson(PROFILE, profile);
     process.stdout.write(JSON.stringify({
-      systemMessage: `skill-router: ${profile.cleanup.length === 1 ? '1 installed skill looks' : `${profile.cleanup.length} installed skills look`} duplicated or deprecated. Run /skill-router:cleanup to review them — nothing changes without your OK.`,
+      systemMessage: `skill-router: ${flagged === 1 ? '1 installed skill looks' : `${flagged} installed skills look`} duplicated or deprecated. Run /skill-router:cleanup to review them — nothing changes without your OK.`,
     }));
   }
 }
@@ -73,12 +78,12 @@ function run() {
   const names = new Set(catalog.map(s => s.name));
   const message = [
     'SKILLS:',
-    ...catalog.map(s => `- ${s.name}: ${s.description}`),
+    ...catalog.map(s => `- ${s.name}: ${s.description}\n  body: ${s.excerpt}`),
     '\nFILE KINDS:',
     ...Object.entries(FILE_KINDS).map(([id, k]) => `- ${id}: ${k.desc}`),
   ].join('\n');
 
-  const res = askClaude({ model: 'sonnet', system: SYSTEM, message, timeout: 240000 });
+  const res = askClaude({ model: 'opus', system: SYSTEM, message, timeout: 300000 });
   const out = extractJson(res.text, '{');
   if (!out) {
     log(`setup failed status=${res.status} error=${res.error || ''} output=${res.text.slice(0, 200)}`);
@@ -87,7 +92,9 @@ function run() {
   }
 
   const valid = (list) => [...new Set((list || []).filter(n => names.has(n)))];
+  const { protect } = loadOverrides();
   const profile = {
+    setupVersion: SETUP_VERSION,
     signature: catalogSignature(catalog),
     builtAt: new Date().toISOString(),
     skillCount: catalog.length,
@@ -97,7 +104,7 @@ function run() {
       .map(([kind, list]) => [kind, valid(list)])
       .filter(([, list]) => list.length)),
     cleanup: (out.cleanup || [])
-      .filter(c => names.has(c.skill))
+      .filter(c => names.has(c.skill) && !protect.includes(c.skill))
       .map(c => ({ ...c, source: catalog.find(s => s.name === c.skill).source, dir: catalog.find(s => s.name === c.skill).dir })),
     cleanupNoticeShown: false,
   };
