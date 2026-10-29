@@ -13,7 +13,7 @@ Claude Code rarely invokes installed skills on its own. This plugin makes it use
 /plugin install skill-router@skill-router
 ```
 
-In the VS Code extension `/plugin` is not available; run the same from a terminal instead:
+Or in a terminal:
 
 ```
 claude plugin marketplace add Ilkegnn/skill-router
