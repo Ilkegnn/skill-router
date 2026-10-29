@@ -51,3 +51,7 @@ Not needed — everything above is automatic. If you want the last word on somet
 - `fileRules`: replaces the tuned skills for a file kind (`ui`, `motion`, `test`, `e2e`, `reactNative`, `swift`, `android`, `python`, `rust`, `go`, `sql`, `infra`, `llmApp`, `designSpec`, `skillFile`).
 
 Requires Node.js on PATH.
+
+## License
+
+MIT
