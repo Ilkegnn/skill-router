@@ -8,6 +8,8 @@ Claude Code rarely invokes installed skills on its own. This plugin makes it use
 
 ## Install
 
+Inside Claude Code:
+
 ```
 /plugin marketplace add Ilkegnn/skill-router
 /plugin install skill-router@skill-router
@@ -21,6 +23,26 @@ claude plugin install skill-router@skill-router
 ```
 
 Start a new session. You will see one message while it tunes itself (about a minute, in the background).
+
+## Update
+
+To update to the latest version:
+
+Inside Claude Code:
+
+```
+/plugin marketplace update Ilkegnn/skill-router
+/plugin update skill-router
+```
+
+Or in a terminal:
+
+```
+claude plugin marketplace update Ilkegnn/skill-router
+claude plugin update skill-router@skill-router
+```
+
+The router automatically detects new setup versions and re-tunes itself in the background when your next session starts.
 
 ## Cost & Performance
 
