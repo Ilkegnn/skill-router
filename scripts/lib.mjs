@@ -545,15 +545,57 @@ export async function askGeminiFlash({ system, message, timeout = 15000 }) {
   return { error: lastError || 'No responding Gemini Flash model' };
 }
 
+export function findAgy() {
+  const home = os.homedir();
+  const candidates = [
+    'agy',
+    'agy.exe',
+    path.join(home, 'AppData', 'Local', 'agy', 'bin', 'agy.exe'),
+    path.join(home, '.agy', 'bin', 'agy'),
+  ];
+  for (const c of candidates) {
+    try {
+      const probe = spawnSync(c, ['--help'], { encoding: 'utf8', timeout: 3000 });
+      if (probe.status === 0) return c;
+    } catch {}
+  }
+  return null;
+}
+
+export function askAgy({ model = 'gemini-3.8-flash-low', system, message, timeout = 12000 } = {}) {
+  const agy = findAgy();
+  if (!agy) return { error: 'agy CLI not found' };
+
+  const prompt = `${system}\n\nTask:\n${message}`;
+  try {
+    const res = spawnSync(agy, ['--model', model, '--disable-slash-commands', '-p', prompt], {
+      encoding: 'utf8',
+      timeout,
+      env: { ...process.env, SKILL_ROUTER_CHILD: '1' }
+    });
+    if (res.status === 0 && res.stdout) {
+      return { text: res.stdout.trim(), status: 0 };
+    }
+    return { text: '', error: res.stderr || `agy exit code ${res.status}` };
+  } catch (err) {
+    return { text: '', error: err.message };
+  }
+}
+
 export async function askFlash({ system, message, timeout = 20000, platform = 'claude' }) {
   if (platform === 'antigravity') {
-    const geminiRes = await askGeminiFlash({ system, message, timeout: 15000 });
-    if (geminiRes.text) return geminiRes;
+    // 1. Antigravity native CLI worker (agy.exe)
+    const agyRes = askAgy({ system, message, timeout: Math.min(timeout, 12000) });
+    if (agyRes.text) return agyRes;
 
-    const claudeRes = askClaude({ model: 'haiku', system, message, timeout });
-    if (claudeRes.text) return claudeRes;
+    // 2. Direct Gemini API if API key exists and agy was unavailable
+    if (getGeminiApiKey()) {
+      const geminiRes = await askGeminiFlash({ system, message, timeout: 8000 });
+      if (geminiRes.text) return geminiRes;
+    }
 
-    return { text: '', error: geminiRes.error || claudeRes.error };
+    // Never call Claude CLI from Antigravity
+    return { text: '', error: agyRes.error || 'Antigravity router unavailable' };
   }
   return askClaude({ model: 'haiku', system, message, timeout });
 }

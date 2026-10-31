@@ -126,24 +126,30 @@ async function antigravityRoute({ input, prompt, sid, cwd, state, ignore }) {
   const invokedShort = new Set((state.invoked || []).map(s => s.split(':').pop()));
   const catalog = buildCatalog(cwd, 'antigravity').filter(s => !ignore.includes(s.name) && !invokedShort.has(s.name.split(':').pop()));
   const names = new Set(catalog.map(s => s.name));
-  const hints = (loadProfile()?.hints || []).map(h => `${h.domain}: ${h.skills.join(', ')}`).join('\n');
 
-  const message = [
-    'SKILL CATALOG:',
-    ...catalog.map(s => `<skill name="${s.name}">\n<description>${s.description}</description>\n</skill>`),
-    hints && `\nPREFERRED SKILLS PER DOMAIN:\n${hints}`,
-    `\nTASK:\n${prompt.slice(0, MAX_PROMPT_CHARS)}`,
-  ].filter(Boolean).join('\n');
+  // 1. Fast heuristic matching first (zero latency)
+  let picked = matchSkillsHeuristically(prompt, catalog);
+  let res = { status: 0, text: '' };
 
-  const started = Date.now();
-  const res = await askFlash({ system: RULES, message, timeout: 20000, platform: 'antigravity' });
-  const out = extractJson(res.text, '{') || { skills: extractJson(res.text, '[') || [] };
-  let picked = [...new Set((out.skills || []).filter(n => names.has(n)))];
+  // 2. If no heuristic match, invoke Antigravity Flash agent
   if (!picked.length) {
-    picked = matchSkillsHeuristically(prompt, catalog);
+    const hints = (loadProfile()?.hints || []).map(h => `${h.domain}: ${h.skills.join(', ')}`).join('\n');
+    const message = [
+      'SKILL CATALOG:',
+      ...catalog.map(s => `<skill name="${s.name}">\n<description>${s.description}</description>\n</skill>`),
+      hints && `\nPREFERRED SKILLS PER DOMAIN:\n${hints}`,
+      `\nTASK:\n${prompt.slice(0, MAX_PROMPT_CHARS)}`,
+    ].filter(Boolean).join('\n');
+
+    const started = Date.now();
+    res = await askFlash({ system: RULES, message, timeout: 12000, platform: 'antigravity' });
+    const out = extractJson(res.text, '{') || { skills: extractJson(res.text, '[') || [] };
+    picked = [...new Set((out.skills || []).filter(n => names.has(n)))];
+    log(`route platform=antigravity session=${sid} ms=${Date.now() - started} status=${res.status} picked=${JSON.stringify(picked)}${res.error ? ' error=' + res.error : ''}`);
+  } else {
+    log(`route platform=antigravity session=${sid} heuristic=true picked=${JSON.stringify(picked)}`);
   }
 
-  log(`route platform=antigravity session=${sid} ms=${Date.now() - started} status=${res.status} picked=${JSON.stringify(picked)}${res.error ? ' error=' + res.error : ''}`);
   if (!picked.length) return;
 
   state.routed = [...new Set([...(state.routed || []), ...picked])];
