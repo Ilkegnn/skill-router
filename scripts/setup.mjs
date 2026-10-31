@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, loadOverrides, writeJson,
-  askClaude, extractJson, log, readStdin, performMaintenance, detectPlatform,
+  askClaude, extractJson, log, readStdin, performMaintenance, detectPlatform, routerMode,
 } from './lib.mjs';
 
 // Bump when the setup prompt or profile format changes, so existing installs re-tune once.
@@ -71,6 +71,8 @@ async function hook() {
 
   // Run lightweight log and state maintenance
   performMaintenance();
+  // Inline mode in Claude makes no separate model calls, so skip tuning there
+  if (platform !== 'antigravity' && routerMode() === 'inline') return;
 
   const catalog = buildCatalog(cwd, platform);
   const profile = loadProfile();

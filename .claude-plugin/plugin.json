@@ -1,6 +1,6 @@
 {
   "name": "skill-router",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Universal skill router for Claude Code and Antigravity: cheap fast agents (Haiku & Gemini Flash) route tasks to relevant skills, and file edits remind the model about skills for that file type.",
   "author": { "name": "Ilke" },
   "license": "MIT",

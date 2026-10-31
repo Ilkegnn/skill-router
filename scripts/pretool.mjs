@@ -56,10 +56,10 @@ async function main() {
 
   const profile = loadProfile();
   const file = args.file_path || args.notebook_path || args.Path || '';
-  if (!profile || !file) return;
+  if (!file) return;
 
   const overrides = loadOverrides();
-  const rules = { ...profile.fileRules, ...overrides.fileRules };
+  const rules = { ...(profile?.fileRules || {}), ...overrides.fileRules };
   const content = [
     args.content,
     args.Content,

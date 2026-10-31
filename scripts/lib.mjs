@@ -1,4 +1,4 @@
-// Shared helpers: skill catalog, per-user profile and per-session state, and multi-agent LLM runners (Haiku & Gemini Flash).
+// Shared helpers: skill catalog, per-user profile and per-session state, and a headless `claude -p` runner.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -6,17 +6,24 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 export const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-export const GEMINI_CONFIG_DIR = path.join(os.homedir(), '.gemini', 'config');
 export const DATA_DIR = path.join(CLAUDE_DIR, 'skill-router');
 export const PROFILE = path.join(DATA_DIR, 'profile.json');
 
-// Detect whether running under Antigravity or Claude Code
+export const GEMINI_CONFIG_DIR = path.join(os.homedir(), '.gemini', 'config');
+
 export function detectPlatform(input = {}) {
-  if (process.env.ANTIGRAVITY_AGENT || input.conversationId || input.lastUserInput !== undefined || input.toolCall) {
+  if (input.tool_name || (input.session_id && !input.conversationId && input.lastUserInput === undefined)) {
+    return 'claude';
+  }
+  if (input.conversationId || input.lastUserInput !== undefined || input.toolCall) {
+    return 'antigravity';
+  }
+  if (process.env.ANTIGRAVITY_AGENT) {
     return 'antigravity';
   }
   return 'claude';
 }
+
 
 // Robust frontmatter parser: handles UTF-8 BOM, chomp indicators (>-, |+, >|), and multiline folded blocks.
 export function parseFrontmatter(file) {
@@ -59,11 +66,10 @@ function scan(dir, prefix, source, out, allowOverwrite = true) {
     const fm = parseFrontmatter(path.join(dir, e.name, 'SKILL.md'));
     if (!fm || fm['disable-model-invocation'] === 'true') continue;
     const baseName = (/^[a-z0-9][a-z0-9-]*$/.test(fm.name || '') ? fm.name : e.name);
-    let name = prefix + baseName;
-    // Security & Shadowing protection: do not let untrusted project skills overwrite user or plugin skills
-    if (!allowOverwrite && out.has(name)) {
-      name = `project:${baseName}`;
-    }
+    const name = prefix + baseName;
+    // Shadowing protection: a project skill never replaces a user or plugin skill of the same name. Claude Code
+    // invokes the bare name, so a renamed `project:x` could not be invoked; keep the trusted one instead.
+    if (!allowOverwrite && out.has(name)) continue;
     out.set(name, {
       name,
       source,
@@ -74,15 +80,64 @@ function scan(dir, prefix, source, out, allowOverwrite = true) {
   }
 }
 
-// Every skill the model can invoke across Claude Code and Antigravity ecosystems.
+const listDirs = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => path.join(dir, e.name)); } catch { return []; } };
+
+// A plugin may keep its skills somewhere other than `skills/` and say so in plugin.json (`"skills": "./.claude/skills/"`).
+function pluginSkillDirs(root) {
+  const manifest = readJson(path.join(root, '.claude-plugin', 'plugin.json'), {});
+  const declared = manifest.skills ? [].concat(manifest.skills) : [];
+  return { name: manifest.name, dirs: [...new Set(['skills', ...declared].map(d => path.resolve(root, d)))] };
+}
+
+function scanPlugin(root, prefix, source, out) {
+  for (const dir of pluginSkillDirs(root).dirs) scan(dir, prefix, source, out);
+}
+
+// Data folders of the Claude desktop app. It installs plugins and the claude.ai skill bundle there, not under ~/.claude.
+function desktopRoots() {
+  const home = os.homedir();
+  const bases = [
+    process.env.SKILL_ROUTER_DESKTOP_DATA,
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Claude-Data'),
+    path.join(home, 'Library', 'Application Support', 'Claude-Data'),
+    path.join(home, 'Library', 'Application Support', 'Claude'),
+    path.join(home, '.config', 'Claude-Data'),
+  ].filter(Boolean);
+  // Each base holds one folder per signed-in profile (e.g. `claude_xxxx`); accept the base itself too.
+  return bases.flatMap(b => [b, ...listDirs(b)]).filter(d => fs.existsSync(path.join(d, 'rpm')) || fs.existsSync(path.join(d, 'local-agent-mode-sessions')));
+}
+
+function scanDesktop(out) {
+  for (const root of desktopRoots()) {
+    // rpm/<org>/<account>/manifest.json lists the installed plugins; each lives in a sibling folder named by id.
+    for (const org of listDirs(path.join(root, 'rpm'))) {
+      for (const account of listDirs(org)) {
+        const manifest = readJson(path.join(account, 'manifest.json'), null);
+        if (!manifest) continue;
+        for (const p of manifest.plugins || []) {
+          if (p.enabled === false || p.installationPreference === 'disabled') continue;
+          const dir = path.join(account, p.id);
+          const name = pluginSkillDirs(dir).name || p.name;
+          if (name) scanPlugin(dir, `${name}:`, `desktop:${name}`, out);
+        }
+      }
+    }
+    // The claude.ai skill bundle; keep only the most recently updated copy.
+    const bundles = listDirs(path.join(root, 'local-agent-mode-sessions', 'skills-plugin')).flatMap(listDirs)
+      .filter(d => fs.existsSync(path.join(d, 'skills')))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    if (bundles[0]) scanPlugin(bundles[0], `${pluginSkillDirs(bundles[0]).name || 'anthropic-skills'}:`, 'synced', out);
+  }
+}
+
+// Every skill the model can invoke: user, claude.ai-synced, enabled plugins (CLI and desktop app), extra dirs from
+// overrides, then the project (never shadows the others).
 export function buildCatalog(cwd, platform = 'auto') {
   const out = new Map();
 
   // 1. Antigravity skills
   if (platform === 'antigravity' || platform === 'auto') {
     scan(path.join(GEMINI_CONFIG_DIR, 'skills'), '', 'antigravity-user', out);
-
-    // Antigravity plugins
     const agyPlugins = path.join(GEMINI_CONFIG_DIR, 'plugins');
     try {
       for (const p of fs.readdirSync(agyPlugins, { withFileTypes: true })) {
@@ -91,39 +146,53 @@ export function buildCatalog(cwd, platform = 'auto') {
         }
       }
     } catch {}
-
-    // Workspace Antigravity skills
     if (cwd) {
       scan(path.join(cwd, '.agents', 'skills'), '', 'workspace-agent', out, false);
       scan(path.join(cwd, '.agent', 'skills'), '', 'workspace-agent', out, false);
     }
   }
-
-  // 2. Claude Code skills
   if (platform === 'claude' || platform === 'auto') {
     scan(path.join(CLAUDE_DIR, 'skills'), '', 'user', out);
 
-    const synced = path.join(CLAUDE_DIR, 'skills', 'synced');
-    try {
-      for (const bundle of fs.readdirSync(synced)) {
-        scan(path.join(synced, bundle), 'anthropic-skills:', 'synced', out);
-      }
-    } catch {}
+  const synced = path.join(CLAUDE_DIR, 'skills', 'synced');
+  try {
+    for (const bundle of fs.readdirSync(synced)) {
+      scan(path.join(synced, bundle), 'anthropic-skills:', 'synced', out);
+    }
+  } catch {}
 
-    try {
-      const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
-      const installed = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf8'));
-      const plugins = installed.plugins || installed;
-      for (const [id, on] of Object.entries(settings.enabledPlugins || {})) {
-        if (!on || !plugins[id]?.[0]?.installPath) continue;
-        scan(path.join(plugins[id][0].installPath, 'skills'), id.split('@')[0] + ':', `plugin:${id}`, out);
-      }
-    } catch {}
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
+    const installed = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf8'));
+    const plugins = installed.plugins || installed;
+    for (const [id, on] of Object.entries(settings.enabledPlugins || {})) {
+      if (!on || !plugins[id]?.[0]?.installPath) continue;
+      scanPlugin(plugins[id][0].installPath, id.split('@')[0] + ':', `plugin:${id}`, out);
+    }
+  } catch {}
 
-    if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out, false);
+  scanDesktop(out);
+
+  for (const extra of loadOverrides().extraSkillDirs) {
+    const dir = typeof extra === 'string' ? extra : extra?.dir;
+    if (dir) scan(dir.replace(/^~(?=$|[\\/])/, os.homedir()), extra?.prefix || '', 'extra', out);
   }
 
-  return [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
+  // Untrusted project skills do not overwrite user/plugin skills
+  if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out, false);
+  }
+
+  // A local copy of a plugin skill (same name, e.g. `systematic-debugging` next to `superpowers:systematic-debugging`)
+  // would be offered twice; keep the one the user installed directly.
+  const list = [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
+
+  // Aliases inside one plugin (same description, different name): keep the shortest name.
+  const seen = new Map();
+  for (const s of [...list].sort((a, b) => a.name.length - b.name.length)) {
+    const key = `${s.source}\n${s.description.toLowerCase().replace(/\W+/g, ' ').trim()}`;
+    if (s.description && seen.has(key)) s.alias = true; else seen.set(key, s.name);
+  }
+  return list.filter(s => !s.alias);
 }
 
 // Catalog signature includes name, description, and excerpt so edits in SKILL.md trigger a re-tune.
@@ -147,9 +216,42 @@ export function writeJson(file, value) {
 
 export const loadProfile = () => readJson(PROFILE, null);
 
+// Optional; absent by default. Two layers, the project's winning over the user's:
+//   ~/.claude/skill-router/overrides.json      â€” yours, every project on this machine
+//   <project>/.claude/skill-router.json        â€” committed with the repo, so it reaches cloud sessions and teammates
+// protect: never offered for cleanup. ignore: never routed or reminded. fileRules: replaces setup's choice for a kind.
+// extraSkillDirs: more folders of skills ("dir" or {dir, prefix}). minPromptChars: shortest prompt that gets routed.
+export function projectDir() {
+  return process.env.CLAUDE_PROJECT_DIR || process.env.SKILL_ROUTER_PROJECT || null;
+}
+
 export function loadOverrides() {
-  const o = readJson(path.join(DATA_DIR, 'overrides.json'), {});
-  return { protect: o.protect || [], ignore: o.ignore || [], fileRules: o.fileRules || {} };
+  const user = readJson(path.join(DATA_DIR, 'overrides.json'), {});
+  const dir = projectDir();
+  const proj = dir ? readJson(path.join(dir, '.claude', 'skill-router.json'), {}) : {};
+  const o = { ...user, ...proj };
+  const union = (k) => [...new Set([...(user[k] || []), ...(proj[k] || [])])];
+  return {
+    protect: union('protect'),
+    ignore: union('ignore'),
+    fileRules: { ...(user.fileRules || {}), ...(proj.fileRules || {}) },
+    extraSkillDirs: union('extraSkillDirs'),
+    minPromptChars: Number.isFinite(o.minPromptChars) ? o.minPromptChars : 25,
+    // "notify" (default): suggest a model/effort when the task looks clearly over- or under-powered. "off": never.
+    advisor: o.advisor === 'off' ? 'off' : 'notify',
+    // "auto" (default): inline in the desktop app and in cloud sessions, haiku elsewhere. "haiku": always ask a
+    // separate Haiku (needs a logged-in claude CLI). "inline": never call a model; the session's own model routes.
+    mode: ['haiku', 'inline'].includes(o.mode) ? o.mode : 'auto',
+  };
+}
+
+// The desktop app does not hand its login to child processes, and a cloud session's login is not ours to borrow, so
+// a separate `claude -p` is not an option there. Route inline.
+export function routerMode() {
+  const { mode } = loadOverrides();
+  if (mode !== 'auto') return mode;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' || process.env.CLAUDE_CODE_REMOTE === 'true' || authMissingRecently()) return 'inline';
+  return 'haiku';
 }
 
 const stateFile = (sid) => path.join(DATA_DIR, 'state', `${String(sid).replace(/[^\w-]/g, '')}.json`);
@@ -163,11 +265,11 @@ export function log(line) {
   } catch {}
 }
 
-// Maintenance: cleans state files older than 7 days and rotates router.log if > 1MB.
+// Maintenance: cleans state and cached prompt files older than 7 days and rotates router.log if > 1MB.
 export function performMaintenance() {
   try {
-    const stateDir = path.join(DATA_DIR, 'state');
-    if (fs.existsSync(stateDir)) {
+    for (const stateDir of [path.join(DATA_DIR, 'state'), path.join(DATA_DIR, 'prompts')]) {
+      if (!fs.existsSync(stateDir)) continue;
       const now = Date.now();
       const maxAge = 7 * 24 * 60 * 60 * 1000;
       for (const file of fs.readdirSync(stateDir)) {
@@ -201,75 +303,15 @@ export async function readStdin() {
     const clean = data.replace(/^[\uFEFF\u00EF\u00BB\u00BF\0]+/, '').trim();
     const start = clean.indexOf('{');
     const end = clean.lastIndexOf('}');
-    if (start !== -1 && end > start) {
-      return JSON.parse(clean.slice(start, end + 1));
-    }
-    return JSON.parse(clean || '{}');
+    const input = (start !== -1 && end > start) ? JSON.parse(clean.slice(start, end + 1)) : JSON.parse(clean || '{}');
+    if (input.cwd && !process.env.CLAUDE_PROJECT_DIR) process.env.SKILL_ROUTER_PROJECT = input.cwd;
+    return input;
   } catch {
     return {};
   }
 }
 
-// Safely finds Gemini API Key from environment or local config files
-export function getGeminiApiKey() {
-  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
-  if (process.env.GOOGLE_API_KEY) return process.env.GOOGLE_API_KEY.trim();
-  const candidates = [
-    path.join(os.homedir(), '.gemini', 'gemini_api_key'),
-    path.join(os.homedir(), '.config', 'gemini', 'api_key'),
-  ];
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) {
-        const key = fs.readFileSync(c, 'utf8').trim();
-        if (key.length > 20) return key;
-      }
-    } catch {}
-  }
-  return null;
-}
-
-// Calls Gemini Flash API directly via native fetch (lightning fast, ~500ms)
-export async function askGeminiFlash({ system, message, timeout = 15000 }) {
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) return { error: 'No Gemini API key found' };
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-
-  // Active Gemini models
-  let lastError = '';
-  const models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-3.8-flash'];
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: system }] },
-          contents: [{ parts: [{ text: message }] }],
-        })
-      });
-      const data = await res.json();
-      if (data.error) {
-        lastError = data.error.message;
-        continue;
-      }
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      return { text, status: 0 };
-    } catch (err) {
-      if (err.name === 'AbortError') return { error: 'Gemini API Timeout' };
-      return { error: err.message };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return { error: 'No responding Gemini Flash model' };
-}
-
-// Dynamically searches PATH across platforms for Claude CLI binary
+// Dynamically searches PATH across platforms (including Windows .cmd, .exe, .bat, nvm/fnm paths).
 function claudeExe() {
   const home = os.homedir();
   const isWin = process.platform === 'win32';
@@ -304,11 +346,23 @@ function claudeExe() {
   return null;
 }
 
-// Runs a one-shot, tool-less `claude -p`
+// Runs a one-shot, tool-less, plugin-less `claude -p` so it neither recurses into these hooks nor loads the user's setup.
+// While the CLI has no login, every call fails after a few seconds. Remember that for a while instead of paying the
+// wait on every prompt. Cleared by any successful call.
+const AUTH_FLAG = path.join(DATA_DIR, 'auth-missing');
+const AUTH_RETRY_MS = 15 * 60 * 1000;
+export function authMissingRecently() {
+  try { return Date.now() - fs.statSync(AUTH_FLAG).mtimeMs < AUTH_RETRY_MS; } catch { return false; }
+}
+
 export function askClaude({ model, system, message, timeout }) {
   const exe = claudeExe();
+  // The system prompt goes through a file: no Windows command-line length limit, and an identical prefix on every
+  // call so the API can serve it from the prompt cache.
+  const sysFile = path.join(DATA_DIR, 'prompts', crypto.createHash('sha1').update(system).digest('hex').slice(0, 12) + '.txt');
+  if (!fs.existsSync(sysFile)) writeText(sysFile, system);
   const base = ['-p', '--model', model, '--setting-sources', '', '--strict-mcp-config', '--tools', '',
-    '--disable-slash-commands', '--no-session-persistence'];
+    '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json'];
   const opts = {
     cwd: os.tmpdir(),
     encoding: 'utf8',
@@ -317,30 +371,59 @@ export function askClaude({ model, system, message, timeout }) {
     env: { ...process.env, SKILL_ROUTER_CHILD: '1' },
   };
 
-  const res = exe
-    ? spawnSync(exe, [...base, '--system-prompt', system], { ...opts, input: message })
-    : spawnSync('claude', [...base, '--system-prompt', system], { ...opts, shell: process.platform === 'win32', input: message });
+  // .cmd/.bat shims (npm installs on Windows) and an unknown location need a shell; quote every argument for it.
+  const args = [...base, '--system-prompt-file', sysFile];
+  const useShell = !exe || /\.(cmd|bat)$/i.test(exe);
+  const res = useShell
+    ? spawnSync(`"${exe || 'claude'}"`, args.map(a => `"${a}"`), { ...opts, shell: true, input: message })
+    : spawnSync(exe, args, { ...opts, input: message });
 
-  return { text: res.stdout || '', status: res.status, error: res.error?.message };
-}
-
-// Unified fast model dispatcher: calls Gemini Flash for Antigravity, Claude Haiku for Claude Code
-export async function askFlash({ system, message, timeout = 20000, platform = 'claude' }) {
-  if (platform === 'antigravity') {
-    // 1. Try native Gemini Flash first
-    const geminiRes = await askGeminiFlash({ system, message, timeout: 15000 });
-    if (geminiRes.text) return geminiRes;
-
-    // 2. Fall back to Claude Haiku if available
-    const claudeRes = askClaude({ model: 'haiku', system, message, timeout });
-    if (claudeRes.text) return claudeRes;
-
-    return { text: '', error: geminiRes.error || claudeRes.error };
+  const raw = `${res.stdout || ''}\n${res.stderr || ''}`;
+  const out = extractJson(res.stdout || '', '{');
+  const text = out?.result ?? res.stdout ?? '';
+  if (/not logged in|please run \/login|invalid api key/i.test(out?.is_error ? text : raw)) {
+    writeText(AUTH_FLAG, String(Date.now()));
+    return { text: '', status: res.status, error: 'not-logged-in' };
   }
-
-  // Claude platform
-  return askClaude({ model: 'haiku', system, message, timeout });
+  if (out && !out.is_error) fs.rmSync(AUTH_FLAG, { force: true });
+  const u = out?.usage || {};
+  return {
+    text,
+    status: res.status,
+    error: res.error?.message || (out?.is_error ? String(text).slice(0, 200) : undefined),
+    cost: out?.total_cost_usd,
+    tokens: { in: u.input_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens, out: u.output_tokens },
+  };
 }
+
+function writeText(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+}
+
+// Model and effort the session last ran with, read from the newest transcript entries. Effort is not passed to hooks
+// as an environment variable in every host, but the transcript records it per turn.
+export function currentSession(transcriptPath) {
+  let tail = '';
+  try {
+    const fd = fs.openSync(transcriptPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, 512 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    tail = buf.toString('utf8');
+  } catch {}
+  const last = (re) => { const all = [...tail.matchAll(re)]; return all.length ? all[all.length - 1][1] : null; };
+  return {
+    model: last(/"model":"(claude-[^"]+)"/g) || process.env.ANTHROPIC_MODEL || null,
+    effort: last(/"(?:perTurnEffort|effort)":"(low|medium|high|xhigh|max)"/g) || process.env.CLAUDE_EFFORT || null,
+  };
+}
+
+export const MODEL_TIERS = ['haiku', 'sonnet', 'opus', 'fable'];
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const tierOf = (model) => MODEL_TIERS.findIndex(t => String(model || '').toLowerCase().includes(t));
 
 // Balanced bracket JSON extractor: ignores brackets inside string literals and avoids greedy slice failures.
 export function extractJson(text, open) {
@@ -406,7 +489,75 @@ export const FILE_KINDS = {
   skillFile: { desc: 'SKILL.md files (writing a skill)', test: (f) => path.basename(f) === 'SKILL.md' },
 };
 
-// Local keyword-based intent fallback when LLM APIs are busy or offline
+
+export function getGeminiApiKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
+  if (process.env.GOOGLE_API_KEY) return process.env.GOOGLE_API_KEY.trim();
+  const candidates = [
+    path.join(os.homedir(), '.gemini', 'gemini_api_key'),
+    path.join(os.homedir(), '.config', 'gemini', 'api_key'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) {
+        const key = fs.readFileSync(c, 'utf8').trim();
+        if (key.length > 20) return key;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export async function askGeminiFlash({ system, message, timeout = 15000 }) {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) return { error: 'No Gemini API key found' };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  let lastError = '';
+  const models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-3.8-flash'];
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ parts: [{ text: message }] }],
+        })
+      });
+      const data = await res.json();
+      if (data.error) {
+        lastError = data.error.message;
+        continue;
+      }
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      return { text, status: 0 };
+    } catch (err) {
+      if (err.name === 'AbortError') return { error: 'Gemini API Timeout' };
+      lastError = err.message;
+    }
+  }
+  clearTimeout(timer);
+  return { error: lastError || 'No responding Gemini Flash model' };
+}
+
+export async function askFlash({ system, message, timeout = 20000, platform = 'claude' }) {
+  if (platform === 'antigravity') {
+    const geminiRes = await askGeminiFlash({ system, message, timeout: 15000 });
+    if (geminiRes.text) return geminiRes;
+
+    const claudeRes = askClaude({ model: 'haiku', system, message, timeout });
+    if (claudeRes.text) return claudeRes;
+
+    return { text: '', error: geminiRes.error || claudeRes.error };
+  }
+  return askClaude({ model: 'haiku', system, message, timeout });
+}
+
 export function matchSkillsHeuristically(prompt, catalog) {
   const text = (prompt || '').toLowerCase();
   const matched = [];
@@ -420,7 +571,7 @@ export function matchSkillsHeuristically(prompt, catalog) {
       continue;
     }
 
-    if (text.includes('scraping') || text.includes('scraper') || text.includes('veri çek') || text.includes('kazýma')) {
+    if (text.includes('scraping') || text.includes('scraper') || text.includes('veri ï¿½ek') || text.includes('kazï¿½ma')) {
       if (nameLower.includes('apify') || descLower.includes('scrap')) matched.push(s.name);
     }
     if (text.includes('playwright') || text.includes('cypress') || text.includes('e2e')) {
@@ -429,7 +580,7 @@ export function matchSkillsHeuristically(prompt, catalog) {
     if (text.includes('unit test') || text.includes('test yaz') || text.includes('testleri')) {
       if (nameLower.includes('test') && !nameLower.includes('e2e')) matched.push(s.name);
     }
-    if (text.includes('debug') || text.includes('hata ayýk') || text.includes('fix bug')) {
+    if (text.includes('debug') || text.includes('hata ayï¿½k') || text.includes('fix bug')) {
       if (nameLower.includes('debug') || nameLower.includes('bug')) matched.push(s.name);
     }
   }
