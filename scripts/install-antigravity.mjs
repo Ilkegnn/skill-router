@@ -17,14 +17,14 @@ const hookConfig = {
   SessionStart: [
     {
       type: 'command',
-      command: `node "${setupScript}"`,
+      command: `node ${setupScript}`,
       timeout: 15,
     },
   ],
   PreInvocation: [
     {
       type: 'command',
-      command: `node "${routeScript}"`,
+      command: `node ${routeScript}`,
       timeout: 20,
     },
   ],
@@ -34,7 +34,7 @@ const hookConfig = {
       hooks: [
         {
           type: 'command',
-          command: `node "${pretoolScript}"`,
+          command: `node ${pretoolScript}`,
           timeout: 10,
         },
       ],

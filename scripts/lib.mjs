@@ -197,7 +197,17 @@ export function performMaintenance() {
 export async function readStdin() {
   let data = '';
   for await (const chunk of process.stdin) data += chunk;
-  return JSON.parse(data || '{}');
+  try {
+    const clean = data.replace(/^[\uFEFF\u00EF\u00BB\u00BF\0]+/, '').trim();
+    const start = clean.indexOf('{');
+    const end = clean.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      return JSON.parse(clean.slice(start, end + 1));
+    }
+    return JSON.parse(clean || '{}');
+  } catch {
+    return {};
+  }
 }
 
 // Safely finds Gemini API Key from environment or local config files
@@ -228,7 +238,8 @@ export async function askGeminiFlash({ system, message, timeout = 15000 }) {
   const timer = setTimeout(() => controller.abort(), timeout);
 
   // Active Gemini models
-  const models = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-1.5-flash'];
+  let lastError = '';
+  const models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-3.8-flash'];
   for (const model of models) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -243,8 +254,8 @@ export async function askGeminiFlash({ system, message, timeout = 15000 }) {
       });
       const data = await res.json();
       if (data.error) {
-        if (data.error.code === 404) continue;
-        return { error: data.error.message };
+        lastError = data.error.message;
+        continue;
       }
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
       return { text, status: 0 };
@@ -394,3 +405,34 @@ export const FILE_KINDS = {
   designSpec: { desc: 'DESIGN.md design-system spec', test: (f) => path.basename(f) === 'DESIGN.md' },
   skillFile: { desc: 'SKILL.md files (writing a skill)', test: (f) => path.basename(f) === 'SKILL.md' },
 };
+
+// Local keyword-based intent fallback when LLM APIs are busy or offline
+export function matchSkillsHeuristically(prompt, catalog) {
+  const text = (prompt || '').toLowerCase();
+  const matched = [];
+
+  for (const s of catalog) {
+    const nameLower = s.name.toLowerCase();
+    const descLower = (s.description || '').toLowerCase();
+
+    if (text.includes(nameLower)) {
+      matched.push(s.name);
+      continue;
+    }
+
+    if (text.includes('scraping') || text.includes('scraper') || text.includes('veri çek') || text.includes('kazýma')) {
+      if (nameLower.includes('apify') || descLower.includes('scrap')) matched.push(s.name);
+    }
+    if (text.includes('playwright') || text.includes('cypress') || text.includes('e2e')) {
+      if (nameLower.includes('e2e') || descLower.includes('e2e') || descLower.includes('playwright')) matched.push(s.name);
+    }
+    if (text.includes('unit test') || text.includes('test yaz') || text.includes('testleri')) {
+      if (nameLower.includes('test') && !nameLower.includes('e2e')) matched.push(s.name);
+    }
+    if (text.includes('debug') || text.includes('hata ayýk') || text.includes('fix bug')) {
+      if (nameLower.includes('debug') || nameLower.includes('bug')) matched.push(s.name);
+    }
+  }
+
+  return [...new Set(matched)].slice(0, 5);
+}

@@ -2,7 +2,7 @@
 // Dispatches to Gemini Flash (for Antigravity) or Claude Haiku (for Claude Code).
 import {
   buildCatalog, loadProfile, loadOverrides, loadState, saveState,
-  askFlash, extractJson, log, readStdin, detectPlatform,
+  askFlash, extractJson, log, readStdin, detectPlatform, matchSkillsHeuristically,
 } from './lib.mjs';
 
 const MIN_PROMPT_CHARS = 25;
@@ -51,7 +51,10 @@ async function main() {
   const started = Date.now();
   // Fast flash agent call (Gemini Flash on Antigravity, Claude Haiku on Claude Code)
   const res = await askFlash({ system: SYSTEM, message, timeout: 20000, platform });
-  const picked = [...new Set((extractJson(res.text, '[') || []).filter(n => names.has(n)))];
+  let picked = [...new Set((extractJson(res.text, '[') || []).filter(n => names.has(n)))];
+  if (!picked.length) {
+    picked = matchSkillsHeuristically(prompt, catalog);
+  }
   log(`route platform=${platform} session=${sid} ms=${Date.now() - started} status=${res.status} picked=${JSON.stringify(picked)}${res.error ? ' error=' + res.error : ''}`);
   if (!picked.length) return;
 
