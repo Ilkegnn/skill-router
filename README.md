@@ -1,58 +1,75 @@
-# skill-router
+# skill-router (Universal)
 
-Claude Code rarely invokes installed skills on its own. This plugin makes it use them.
+Coding agents rarely invoke installed skills on their own. This router makes them use them — now supporting both **Claude Code** and **Antigravity**.
 
-- **On every actionable request** (25+ characters, not a `/command` or casual acknowledgement), Haiku reads your message against installed skills and tells the model which ones the task needs, in the order it needs them.
-- **While the model works**, each Edit/Write is checked against the file kind (UI, tests, Swift, Kotlin, SQL, …). If a matching skill is not loaded yet, the model gets a one-time reminder. This part runs locally and costs no tokens.
-- **It tunes itself to your setup.** On first start, and whenever your skill set changes, a background Opus pass groups your skills into domains, maps file kinds to them, and flags duplicated or deprecated skills. Review those with `/skill-router:cleanup`; nothing is removed without your OK.
+- **Fast, specialized routing per platform:**
+  - In **Claude Code:** Claude Haiku analyzes your prompt.
+  - In **Antigravity:** Gemini Flash analyzes your prompt in the background before the main agent generates its reply.
+- **On every actionable request** (25+ characters, not a `/command` or casual chat), the fast model checks installed skills and tells the main model which ones the task needs, in the exact order it needs them.
+- **While editing files**, each file write/edit is checked against the file kind (UI, tests, Swift, Kotlin, SQL, …). If a matching skill is not loaded yet, the agent gets a one-time reminder. This part runs locally and costs zero tokens.
+- **Tuning:** Groups skills into domains, maps file kinds, and flags duplicated or deprecated skills. Review those with `/skill-router:cleanup`.
 
-## Install
+---
 
+## Quick Install
+
+### For Claude Code
 Inside Claude Code:
-
 ```
 /plugin marketplace add Ilkegnn/skill-router
 /plugin install skill-router@skill-router
 ```
-
 Or in a terminal:
-
-```
+```bash
 claude plugin marketplace add Ilkegnn/skill-router
 claude plugin install skill-router@skill-router
 ```
 
-Start a new session. You will see one message while it tunes itself (about a minute, in the background).
+### For Antigravity
+Run the one-click installer from this directory:
+```bash
+node scripts/install-antigravity.mjs
+```
+*This automatically registers `SessionStart`, `PreInvocation` (Gemini Flash routing), and `PreToolUse` (file reminders) into `~/.gemini/config/hooks.json` across all workspaces.*
+
+To enable only for a specific workspace, copy `.agents/hooks.json` to your project root.
+
+---
 
 ## Update
 
-To update to the latest version:
-
+### Claude Code
 Inside Claude Code:
-
 ```
 /plugin marketplace update Ilkegnn/skill-router
 /plugin update skill-router
 ```
-
 Or in a terminal:
-
-```
+```bash
 claude plugin marketplace update Ilkegnn/skill-router
 claude plugin update skill-router@skill-router
 ```
 
-The router automatically detects new setup versions and re-tunes itself in the background when your next session starts.
+### Antigravity
+Simply pull the latest repository:
+```bash
+git pull
+node scripts/install-antigravity.mjs
+```
+
+---
 
 ## Cost & Performance
 
-- **Routing:** one fast Haiku call per actionable work request (~8k input tokens with ~100 skills), with an optimized timeout. Already-invoked skills are skipped.
-- **Tuning:** one background Opus call per skill-set change (~30k input tokens with ~100 skills).
+- **Routing:** One fast call per actionable request (~8k input tokens with ~100 skills) via Haiku (Claude Code) or Gemini Flash (Antigravity). Already-invoked skills are skipped.
+- **Tuning:** One background call per skill-set change (~30k input tokens with ~100 skills).
 - **File reminders:** 100% local regex checking — zero tokens, zero delay.
+
+---
 
 ## Files & Safety
 
-Everything it writes lives in `~/.claude/skill-router/`:
+All state and logs live in `~/.claude/skill-router/`:
 - `profile.json` (the tuned setup, saved atomically)
 - `router.log` (routing decisions, auto-rotated when > 1 MB)
 - `state/` (per-session state, auto-cleaned after 7 days)
@@ -61,7 +78,7 @@ Delete `profile.json` to force a re-tune.
 
 ## Overrides (optional)
 
-Not needed — everything above is automatic. If you want the last word on something, create `~/.claude/skill-router/overrides.json`:
+Create `~/.claude/skill-router/overrides.json` if you want manual overrides:
 
 ```json
 {
@@ -71,7 +88,7 @@ Not needed — everything above is automatic. If you want the last word on somet
 }
 ```
 
-- `protect`: never offered for cleanup (also auto-populated when you choose to keep a flagged skill in `/skill-router:cleanup`).
+- `protect`: never offered for cleanup.
 - `ignore`: never routed or reminded.
 - `fileRules`: replaces the tuned skills for a file kind (`ui`, `motion`, `test`, `e2e`, `reactNative`, `swift`, `android`, `python`, `rust`, `go`, `sql`, `infra`, `llmApp`, `designSpec`, `skillFile`).
 

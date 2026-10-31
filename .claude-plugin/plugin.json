@@ -1,8 +1,8 @@
 {
   "name": "skill-router",
-  "version": "0.3.0",
-  "description": "Makes Claude actually use your installed skills: a cheap Haiku pass picks the skills each task needs, and edits remind the model about skills for that file type. Adapts itself to whatever skills you have installed.",
+  "version": "0.4.0",
+  "description": "Universal skill router for Claude Code and Antigravity: cheap fast agents (Haiku & Gemini Flash) route tasks to relevant skills, and file edits remind the model about skills for that file type.",
   "author": { "name": "Ilke" },
   "license": "MIT",
-  "keywords": ["skills", "hooks", "routing"]
+  "keywords": ["skills", "hooks", "routing", "claude-code", "antigravity"]
 }

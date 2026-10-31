@@ -7,11 +7,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   DATA_DIR, PROFILE, FILE_KINDS, buildCatalog, catalogSignature, loadProfile, loadOverrides, writeJson,
-  askClaude, extractJson, log, readStdin, performMaintenance,
+  askClaude, extractJson, log, readStdin, performMaintenance, detectPlatform,
 } from './lib.mjs';
 
 // Bump when the setup prompt or profile format changes, so existing installs re-tune once.
-const SETUP_VERSION = 4;
+const SETUP_VERSION = 5;
 const LOCK = path.join(DATA_DIR, 'setup.lock');
 const LOCK_TTL_MS = 10 * 60 * 1000;
 
@@ -29,7 +29,7 @@ Rules:
 - fileRules: for each file kind, the one or two skills that should be loaded before editing that kind of file. Leave a kind out if no skill fits well.
 - cleanup: only skills that duplicate another installed skill (same purpose; keep the maintained or more complete one) or that describe themselves as deprecated. Being niche is NOT a reason. When unsure, leave it out.`;
 
-function launchBackground(cwd) {
+function launchBackground(cwd, platform = 'auto') {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     // Clean stale lock if older than LOCK_TTL_MS
@@ -52,6 +52,7 @@ function launchBackground(cwd) {
 
   const args = [fileURLToPath(import.meta.url), '--run'];
   if (cwd) args.push('--cwd', cwd);
+  if (platform) args.push('--platform', platform);
 
   const child = spawn(process.execPath, args, {
     detached: true,
@@ -65,20 +66,26 @@ function launchBackground(cwd) {
 async function hook() {
   if (process.env.SKILL_ROUTER_CHILD) return;
   const input = await readStdin().catch(() => ({}));
-  const cwd = input.cwd;
+  const platform = detectPlatform(input);
+  const cwd = (input.workspacePaths && input.workspacePaths[0]) || input.cwd;
 
   // Run lightweight log and state maintenance
   performMaintenance();
 
-  const catalog = buildCatalog(cwd);
+  const catalog = buildCatalog(cwd, platform);
   const profile = loadProfile();
 
   if (!profile || profile.signature !== catalogSignature(catalog) || profile.setupVersion !== SETUP_VERSION) {
-    launchBackground(cwd);
+    launchBackground(cwd, platform);
     if (!profile) {
-      process.stdout.write(JSON.stringify({
-        systemMessage: `skill-router: tuning itself to your ${catalog.length} skills in the background (one time, about a minute).`,
-      }));
+      const msg = `skill-router: tuning itself to your ${catalog.length} skills in the background (one time, about a minute).`;
+      if (platform === 'antigravity') {
+        process.stdout.write(JSON.stringify({
+          injectSteps: [{ systemMessage: { systemMessage: msg } }]
+        }));
+      } else {
+        process.stdout.write(JSON.stringify({ systemMessage: msg }));
+      }
     }
     return;
   }
@@ -88,9 +95,14 @@ async function hook() {
   if (flagged && !profile.cleanupNoticeShown) {
     profile.cleanupNoticeShown = true;
     writeJson(PROFILE, profile);
-    process.stdout.write(JSON.stringify({
-      systemMessage: `skill-router: ${flagged === 1 ? '1 installed skill looks' : `${flagged} installed skills look`} duplicated or deprecated. Run /skill-router:cleanup to review them — nothing changes without your OK.`,
-    }));
+    const msg = `skill-router: ${flagged === 1 ? '1 installed skill looks' : `${flagged} installed skills look`} duplicated or deprecated. Run /skill-router:cleanup to review them — nothing changes without your OK.`;
+    if (platform === 'antigravity') {
+      process.stdout.write(JSON.stringify({
+        injectSteps: [{ systemMessage: { systemMessage: msg } }]
+      }));
+    } else {
+      process.stdout.write(JSON.stringify({ systemMessage: msg }));
+    }
   }
 }
 
@@ -98,9 +110,11 @@ function run() {
   const started = Date.now();
   const cwdIdx = process.argv.indexOf('--cwd');
   const cwd = cwdIdx !== -1 && process.argv[cwdIdx + 1] ? process.argv[cwdIdx + 1] : undefined;
+  const platIdx = process.argv.indexOf('--platform');
+  const platform = platIdx !== -1 && process.argv[platIdx + 1] ? process.argv[platIdx + 1] : 'auto';
 
   try {
-    const catalog = buildCatalog(cwd);
+    const catalog = buildCatalog(cwd, platform);
     const names = new Set(catalog.map(s => s.name));
 
     // Structured XML tags prevent prompt injection and keep delimiter boundaries clear

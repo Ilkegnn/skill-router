@@ -1,0 +1,30 @@
+{
+  "skill-router": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node \"scripts/setup.mjs\"",
+        "timeout": 15
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node \"scripts/route.mjs\"",
+        "timeout": 20
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"scripts/pretool.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

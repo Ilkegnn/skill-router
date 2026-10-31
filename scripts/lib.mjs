@@ -1,4 +1,4 @@
-// Shared helpers: skill catalog, per-user profile and per-session state, and a headless `claude -p` runner.
+// Shared helpers: skill catalog, per-user profile and per-session state, and multi-agent LLM runners (Haiku & Gemini Flash).
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -6,8 +6,17 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 export const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+export const GEMINI_CONFIG_DIR = path.join(os.homedir(), '.gemini', 'config');
 export const DATA_DIR = path.join(CLAUDE_DIR, 'skill-router');
 export const PROFILE = path.join(DATA_DIR, 'profile.json');
+
+// Detect whether running under Antigravity or Claude Code
+export function detectPlatform(input = {}) {
+  if (process.env.ANTIGRAVITY_AGENT || input.conversationId || input.lastUserInput !== undefined || input.toolCall) {
+    return 'antigravity';
+  }
+  return 'claude';
+}
 
 // Robust frontmatter parser: handles UTF-8 BOM, chomp indicators (>-, |+, >|), and multiline folded blocks.
 export function parseFrontmatter(file) {
@@ -65,33 +74,55 @@ function scan(dir, prefix, source, out, allowOverwrite = true) {
   }
 }
 
-// Every skill the model can invoke: user, claude.ai-synced, enabled plugins, then the project.
-export function buildCatalog(cwd) {
+// Every skill the model can invoke across Claude Code and Antigravity ecosystems.
+export function buildCatalog(cwd, platform = 'auto') {
   const out = new Map();
-  scan(path.join(CLAUDE_DIR, 'skills'), '', 'user', out);
 
-  const synced = path.join(CLAUDE_DIR, 'skills', 'synced');
-  try {
-    for (const bundle of fs.readdirSync(synced)) {
-      scan(path.join(synced, bundle), 'anthropic-skills:', 'synced', out);
+  // 1. Antigravity skills
+  if (platform === 'antigravity' || platform === 'auto') {
+    scan(path.join(GEMINI_CONFIG_DIR, 'skills'), '', 'antigravity-user', out);
+
+    // Antigravity plugins
+    const agyPlugins = path.join(GEMINI_CONFIG_DIR, 'plugins');
+    try {
+      for (const p of fs.readdirSync(agyPlugins, { withFileTypes: true })) {
+        if (p.isDirectory()) {
+          scan(path.join(agyPlugins, p.name, 'skills'), `${p.name}:`, `antigravity-plugin:${p.name}`, out);
+        }
+      }
+    } catch {}
+
+    // Workspace Antigravity skills
+    if (cwd) {
+      scan(path.join(cwd, '.agents', 'skills'), '', 'workspace-agent', out, false);
+      scan(path.join(cwd, '.agent', 'skills'), '', 'workspace-agent', out, false);
     }
-  } catch {}
+  }
 
-  try {
-    const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
-    const installed = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf8'));
-    const plugins = installed.plugins || installed;
-    for (const [id, on] of Object.entries(settings.enabledPlugins || {})) {
-      if (!on || !plugins[id]?.[0]?.installPath) continue;
-      scan(path.join(plugins[id][0].installPath, 'skills'), id.split('@')[0] + ':', `plugin:${id}`, out);
-    }
-  } catch {}
+  // 2. Claude Code skills
+  if (platform === 'claude' || platform === 'auto') {
+    scan(path.join(CLAUDE_DIR, 'skills'), '', 'user', out);
 
-  // Untrusted project skills do not overwrite user/plugin skills
-  if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out, false);
+    const synced = path.join(CLAUDE_DIR, 'skills', 'synced');
+    try {
+      for (const bundle of fs.readdirSync(synced)) {
+        scan(path.join(synced, bundle), 'anthropic-skills:', 'synced', out);
+      }
+    } catch {}
 
-  // A local copy of a plugin skill (same name, e.g. `systematic-debugging` next to `superpowers:systematic-debugging`)
-  // would be offered twice; keep the one the user installed directly.
+    try {
+      const settings = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'settings.json'), 'utf8'));
+      const installed = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'), 'utf8'));
+      const plugins = installed.plugins || installed;
+      for (const [id, on] of Object.entries(settings.enabledPlugins || {})) {
+        if (!on || !plugins[id]?.[0]?.installPath) continue;
+        scan(path.join(plugins[id][0].installPath, 'skills'), id.split('@')[0] + ':', `plugin:${id}`, out);
+      }
+    } catch {}
+
+    if (cwd) scan(path.join(cwd, '.claude', 'skills'), '', 'project', out, false);
+  }
+
   return [...out.values()].filter(s => !(s.name.includes(':') && out.has(s.name.split(':').pop())));
 }
 
@@ -116,8 +147,6 @@ export function writeJson(file, value) {
 
 export const loadProfile = () => readJson(PROFILE, null);
 
-// Optional, user-written; absent by default. { "protect": [...], "ignore": [...], "fileRules": { kind: [...] } }
-// protect: never offered for cleanup. ignore: never routed or reminded. fileRules: replaces setup's choice for a kind.
 export function loadOverrides() {
   const o = readJson(path.join(DATA_DIR, 'overrides.json'), {});
   return { protect: o.protect || [], ignore: o.ignore || [], fileRules: o.fileRules || {} };
@@ -171,7 +200,65 @@ export async function readStdin() {
   return JSON.parse(data || '{}');
 }
 
-// Dynamically searches PATH across platforms (including Windows .cmd, .exe, .bat, nvm/fnm paths).
+// Safely finds Gemini API Key from environment or local config files
+export function getGeminiApiKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
+  if (process.env.GOOGLE_API_KEY) return process.env.GOOGLE_API_KEY.trim();
+  const candidates = [
+    path.join(os.homedir(), '.gemini', 'gemini_api_key'),
+    path.join(os.homedir(), '.config', 'gemini', 'api_key'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) {
+        const key = fs.readFileSync(c, 'utf8').trim();
+        if (key.length > 20) return key;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Calls Gemini Flash API directly via native fetch (lightning fast, ~500ms)
+export async function askGeminiFlash({ system, message, timeout = 15000 }) {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) return { error: 'No Gemini API key found' };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  // Active Gemini models
+  const models = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-1.5-flash'];
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ parts: [{ text: message }] }],
+        })
+      });
+      const data = await res.json();
+      if (data.error) {
+        if (data.error.code === 404) continue;
+        return { error: data.error.message };
+      }
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      return { text, status: 0 };
+    } catch (err) {
+      if (err.name === 'AbortError') return { error: 'Gemini API Timeout' };
+      return { error: err.message };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { error: 'No responding Gemini Flash model' };
+}
+
+// Dynamically searches PATH across platforms for Claude CLI binary
 function claudeExe() {
   const home = os.homedir();
   const isWin = process.platform === 'win32';
@@ -206,7 +293,7 @@ function claudeExe() {
   return null;
 }
 
-// Runs a one-shot, tool-less, plugin-less `claude -p` so it neither recurses into these hooks nor loads the user's setup.
+// Runs a one-shot, tool-less `claude -p`
 export function askClaude({ model, system, message, timeout }) {
   const exe = claudeExe();
   const base = ['-p', '--model', model, '--setting-sources', '', '--strict-mcp-config', '--tools', '',
@@ -224,6 +311,24 @@ export function askClaude({ model, system, message, timeout }) {
     : spawnSync('claude', [...base, '--system-prompt', system], { ...opts, shell: process.platform === 'win32', input: message });
 
   return { text: res.stdout || '', status: res.status, error: res.error?.message };
+}
+
+// Unified fast model dispatcher: calls Gemini Flash for Antigravity, Claude Haiku for Claude Code
+export async function askFlash({ system, message, timeout = 20000, platform = 'claude' }) {
+  if (platform === 'antigravity') {
+    // 1. Try native Gemini Flash first
+    const geminiRes = await askGeminiFlash({ system, message, timeout: 15000 });
+    if (geminiRes.text) return geminiRes;
+
+    // 2. Fall back to Claude Haiku if available
+    const claudeRes = askClaude({ model: 'haiku', system, message, timeout });
+    if (claudeRes.text) return claudeRes;
+
+    return { text: '', error: geminiRes.error || claudeRes.error };
+  }
+
+  // Claude platform
+  return askClaude({ model: 'haiku', system, message, timeout });
 }
 
 // Balanced bracket JSON extractor: ignores brackets inside string literals and avoids greedy slice failures.
